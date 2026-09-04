@@ -74,7 +74,9 @@ The app pauses, shows you the exact tool and arguments, and waits for
 
 ## How to make it your own
 
+Full setup — prerequisites, OpenAI, Jira, and Gmail — is in **SETUP.md**. In short:
+
 1. Drop your own files into `sample_docs/` (RAG indexes them).
 2. Edit `servers/qa_server.py` — rename the tool, change the logic.
-3. Point `jira`/`gmail` at your own accounts via `.env`.
+3. Point `jira`/`gmail` at your own accounts via `.env` (see SETUP.md).
 4. Add any other MCP server in `config/servers.json`.
