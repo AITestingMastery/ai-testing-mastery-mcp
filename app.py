@@ -39,6 +39,70 @@ SERVER_META = {
 }
 DEFAULT_META = {"icon": "🔌", "label": "", "desc": "", "color": "#555"}
 
+# Plain-English description of what each tool does + why the agent reaches for it.
+# Used to explain sources under each answer.
+TOOL_INFO = {
+    "format_bug_report":     ("🧩", "qa",    "Formatted your notes into a standard bug report"),
+    "qa://checklist":        ("🧩", "qa",    "Pulled the QA checklist"),
+    "write_test_cases":      ("🧩", "qa",    "Used the test-case prompt template"),
+    "search_docs":           ("📚", "rag",   "Searched your documents for relevant info"),
+    "jira_search":           ("🗂️", "jira",  "Searched your Jira issues"),
+    "jira_get_issue":        ("🗂️", "jira",  "Read a specific Jira ticket"),
+    "jira_create_issue":     ("🗂️", "jira",  "Created a Jira ticket"),
+    "jira_update_issue":     ("🗂️", "jira",  "Updated a Jira ticket"),
+    "jira_add_comment":      ("🗂️", "jira",  "Added a comment in Jira"),
+    "jira_transition_issue": ("🗂️", "jira",  "Changed a Jira ticket's status"),
+    "gmail_list_messages":   ("✉️", "gmail", "Listed emails from your inbox"),
+    "gmail_search_messages": ("✉️", "gmail", "Searched your Gmail"),
+    "gmail_get_message":     ("✉️", "gmail", "Read a specific email"),
+    "gmail_send_message":    ("✉️", "gmail", "Sent an email"),
+}
+
+
+def describe_tool(name: str) -> tuple[str, str, str]:
+    """Return (icon, server, why) for a tool, with a sensible fallback."""
+    if name in TOOL_INFO:
+        return TOOL_INFO[name]
+    # fallback: infer server from prefix
+    server = name.split("_")[0] if "_" in name else "tool"
+    return ("🔧", server, f"Ran {name}")
+
+
+def extract_doc_sources(result: str) -> list[str]:
+    """Pull '[source: filename]' tags out of a RAG result string."""
+    import re
+    return list(dict.fromkeys(re.findall(r"\[source:\s*([^\]]+)\]", result)))
+
+
+def render_sources(sources: list[dict]) -> None:
+    """Render the 'Sources' panel under an answer."""
+    if not sources:
+        with st.expander("🔎 Sources — none (answered directly, no tools used)"):
+            st.markdown(
+                "<span class='src-none'>The assistant answered from its own reasoning — "
+                "no documents, Jira, or Gmail were consulted for this reply.</span>",
+                unsafe_allow_html=True,
+            )
+        return
+
+    label = f"🔎 Sources — {len(sources)} tool call{'s' if len(sources) != 1 else ''} used"
+    with st.expander(label):
+        for s in sources:
+            docs_html = ""
+            if s["docs"]:
+                docs_html = "<div>" + "".join(
+                    f"<span class='src-doc'>📄 {d}</span>" for d in s["docs"]
+                ) + "</div>"
+            st.markdown(
+                f"""<div class="src-row">
+                  <span class="ic">{s['icon']}</span>
+                  <span class="bd"><b>{s['server']}</b> · {s['why']}
+                  <span class="tl">({s['tool']})</span>{docs_html}</span>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        st.caption("Shows which tools were consulted — the assistant writes the final answer from these.")
+
 st.set_page_config(
     page_title="AI Testing Mastery — MCP Agent",
     page_icon="🧪",
@@ -80,6 +144,17 @@ st.markdown(
         border:1px solid rgba(140,140,140,.25); border-radius:999px;
         padding:3px 11px; font-size:.8rem; color:#666;
       }
+      /* sources panel under answers */
+      .src-row { display:flex; align-items:flex-start; gap:8px; padding:5px 0; }
+      .src-row .ic { font-size:1rem; line-height:1.3; }
+      .src-row .bd { font-size:.83rem; }
+      .src-row .tl { font-family:monospace; font-size:.76rem; color:#888; }
+      .src-doc {
+        display:inline-block; background:rgba(120,160,120,.14);
+        border:1px solid rgba(120,160,120,.3); border-radius:6px;
+        padding:1px 7px; margin:2px 4px 0 0; font-size:.75rem;
+      }
+      .src-none { color:#999; font-size:.83rem; font-style:italic; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -101,6 +176,10 @@ def init_state() -> None:
         st.session_state.tool_log = []
     if "pending_action" not in st.session_state:
         st.session_state.pending_action = None
+    if "turn_sources" not in st.session_state:
+        st.session_state.turn_sources = []
+    if "answer_sources" not in st.session_state:
+        st.session_state.answer_sources = {}  # message index -> sources list
     if "llm" not in st.session_state:
         try:
             st.session_state.llm = LLMClient()
@@ -121,7 +200,8 @@ except Exception as exc:  # noqa: BLE001
 
 
 def run_agent_turn():
-    """Drive one user turn. Returns final text, or None if paused for approval."""
+    """Drive one user turn. Returns final text, or None if paused for approval.
+    Accumulates the tools used this turn into st.session_state.turn_sources."""
     tools = mcp.tools if mcp else None
 
     for _ in range(MAX_TOOL_ROUNDS):
@@ -160,6 +240,7 @@ def run_agent_turn():
                 return None
 
             result = mcp.call_tool(name, args)
+            _record_source(name, result)
             st.session_state.tool_log.append(
                 json.dumps({"tool": name, "args": args, "result": result[:400]}, indent=2)
             )
@@ -170,10 +251,20 @@ def run_agent_turn():
     return "Stopped after too many tool calls — please refine your request."
 
 
+def _record_source(name: str, result: str) -> None:
+    """Log one tool use (icon, server, why, and any RAG doc names) for this turn."""
+    icon, server, why = describe_tool(name)
+    st.session_state.turn_sources.append(
+        {"icon": icon, "server": server, "tool": name, "why": why,
+         "docs": extract_doc_sources(result)}
+    )
+
+
 def resume_after_confirmation(approved: bool) -> str:
     pending = st.session_state.pop("pending_action")
     if approved:
         result = mcp.call_tool(pending["name"], pending["args"])
+        _record_source(pending["name"], result)
         st.session_state.tool_log.append(
             json.dumps(
                 {"tool": pending["name"], "args": pending["args"], "result": result[:400]},
@@ -219,6 +310,7 @@ with st.sidebar:
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         st.session_state.tool_log = []
         st.session_state.pending_action = None
+        st.session_state.turn_sources = []
         st.rerun()
 
 
@@ -276,6 +368,8 @@ for msg in st.session_state.messages:
     avatar = "🧑‍💻" if msg["role"] == "user" else "🧪"
     with st.chat_message(msg["role"], avatar=avatar):
         st.markdown(msg["content"])
+        if msg["role"] == "assistant" and "sources" in msg:
+            render_sources(msg["sources"])
 
 
 # --- pending-action confirmation gate ---------------------------------------
@@ -290,12 +384,18 @@ if st.session_state.pending_action:
             if st.button("✅ Approve & run", use_container_width=True, type="primary"):
                 with st.spinner("Running..."):
                     answer = resume_after_confirmation(approved=True)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": answer,
+                     "sources": list(st.session_state.turn_sources)}
+                )
                 st.rerun()
         with c2:
             if st.button("❌ Cancel", use_container_width=True):
                 answer = resume_after_confirmation(approved=False)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": answer,
+                     "sources": list(st.session_state.turn_sources)}
+                )
                 st.rerun()
     st.stop()
 
@@ -303,6 +403,7 @@ if st.session_state.pending_action:
 # --- chat input -------------------------------------------------------------
 if prompt := st.chat_input("Ask about test plans, bugs, Jira, email..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.turn_sources = []  # fresh source list for this turn
     with st.chat_message("user", avatar="🧑‍💻"):
         st.markdown(prompt)
 
@@ -312,6 +413,9 @@ if prompt := st.chat_input("Ask about test plans, bugs, Jira, email..."):
         if answer is None:
             st.rerun()
         st.markdown(answer)
+        render_sources(st.session_state.turn_sources)
 
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+    st.session_state.messages.append(
+        {"role": "assistant", "content": answer, "sources": list(st.session_state.turn_sources)}
+    )
     st.rerun()
