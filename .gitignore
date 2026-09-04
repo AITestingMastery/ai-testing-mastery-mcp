@@ -1,0 +1,21 @@
+# secrets — never commit
+.env
+.env.*
+!.env.example
+gmail_credentials.json
+credentials.json
+client_secret*.json
+token.json
+*token*.json
+
+# RAG vector store (regenerated from sample_docs)
+chroma_db/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# os
+.DS_Store

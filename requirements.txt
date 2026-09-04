@@ -1,0 +1,8 @@
+# Phase 1 (host + LLM)
+streamlit>=1.40
+openai>=1.50
+python-dotenv>=1.0
+
+# Phase 2+ (added as we go — listed now so one install covers everything)
+mcp>=2,<3           # official MCP Python SDK v2 (MCPServer; v1 code won't run)
+chromadb>=0.5       # local vector store for the RAG server
