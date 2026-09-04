@@ -29,6 +29,7 @@ class LLMClient:
             )
         self.client = OpenAI(api_key=api_key)
         self.model = model or DEFAULT_MODEL
+        self.last_usage = {"prompt": 0, "completion": 0, "total": 0}
 
     def chat(
         self,
@@ -51,6 +52,16 @@ class LLMClient:
             kwargs["tool_choice"] = "auto"
 
         response = self.client.chat.completions.create(**kwargs)
+        # Stash token usage so the app can read it after each call.
+        u = getattr(response, "usage", None)
+        if u is not None:
+            self.last_usage = {
+                "prompt": u.prompt_tokens,
+                "completion": u.completion_tokens,
+                "total": u.total_tokens,
+            }
+        else:
+            self.last_usage = {"prompt": 0, "completion": 0, "total": 0}
         return response.choices[0].message
 
     @staticmethod

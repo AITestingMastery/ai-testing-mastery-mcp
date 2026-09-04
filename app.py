@@ -30,6 +30,16 @@ SYSTEM_PROMPT = (
 CONFIG_PATH = Path(__file__).parent / "config" / "servers.json"
 MAX_TOOL_ROUNDS = 5
 
+# Approximate OpenAI prices, USD per 1,000 tokens. Verified Sep 2026 — edit if
+# rates change (see platform.openai.com/pricing). Only the chat model is metered
+# here; embeddings (RAG) are counted separately and are cheap by comparison.
+PRICES = {
+    "gpt-4o-mini":  {"in": 0.00015, "out": 0.00060},
+    "gpt-4o":       {"in": 0.00250, "out": 0.01000},
+    "gpt-4.1-mini": {"in": 0.00040, "out": 0.00160},
+}
+DEFAULT_PRICE = {"in": 0.00015, "out": 0.00060}  # fall back to mini rates
+
 # Per-server display metadata: icon + short description + accent colour.
 SERVER_META = {
     "qa":    {"icon": "🧩", "label": "Custom QA server", "desc": "Your own tool, resource & prompt", "color": "#2E7D63"},
@@ -155,6 +165,17 @@ st.markdown(
         padding:1px 7px; margin:2px 4px 0 0; font-size:.75rem;
       }
       .src-none { color:#999; font-size:.83rem; font-style:italic; }
+      /* usage panel */
+      .usage { border:1px solid rgba(140,140,140,.22); border-radius:10px; padding:10px 12px; }
+      .u-model { font-weight:600; font-size:.85rem; margin-bottom:8px; }
+      .u-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px 10px; }
+      .u-grid b { font-size:.95rem; }
+      .u-grid span { display:block; font-size:.7rem; color:#8a8a8a; margin-top:-2px; }
+      .u-cost {
+        margin-top:9px; padding-top:8px; border-top:1px solid rgba(140,140,140,.18);
+        font-size:1.05rem; font-weight:650; color:#2E7D63;
+      }
+      .u-cost span { font-size:.72rem; font-weight:400; color:#8a8a8a; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -180,6 +201,8 @@ def init_state() -> None:
         st.session_state.turn_sources = []
     if "answer_sources" not in st.session_state:
         st.session_state.answer_sources = {}  # message index -> sources list
+    if "usage" not in st.session_state:
+        st.session_state.usage = {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
     if "llm" not in st.session_state:
         try:
             st.session_state.llm = LLMClient()
@@ -206,6 +229,12 @@ def run_agent_turn():
 
     for _ in range(MAX_TOOL_ROUNDS):
         message = st.session_state.llm.chat(st.session_state.messages, tools=tools)
+        # accumulate token usage from this call
+        u = st.session_state.llm.last_usage
+        st.session_state.usage["prompt"] += u["prompt"]
+        st.session_state.usage["completion"] += u["completion"]
+        st.session_state.usage["total"] += u["total"]
+        st.session_state.usage["calls"] += 1
         tool_calls = st.session_state.llm.get_tool_calls(message)
 
         if not tool_calls:
@@ -306,11 +335,35 @@ with st.sidebar:
     else:
         st.caption("Tool calls will appear here as the agent works.")
 
+    st.markdown("### 📊 Usage & cost")
+    model = st.session_state.llm.model if st.session_state.get("llm") else "—"
+    price = PRICES.get(model, DEFAULT_PRICE)
+    u = st.session_state.usage
+    est_cost = (u["prompt"] / 1000 * price["in"]) + (u["completion"] / 1000 * price["out"])
+    st.markdown(
+        f"""<div class="usage">
+          <div class="u-model">🤖 {model}</div>
+          <div class="u-grid">
+            <div><b>{u['total']:,}</b><span>total tokens</span></div>
+            <div><b>{u['prompt']:,}</b><span>input</span></div>
+            <div><b>{u['completion']:,}</b><span>output</span></div>
+            <div><b>{u['calls']}</b><span>API calls</span></div>
+          </div>
+          <div class="u-cost">≈ ${est_cost:.4f}<span> est. this session</span></div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"Approximate — at {model} rates (${price['in']*1000:.2f}/1M in, "
+        f"${price['out']*1000:.2f}/1M out). RAG embeddings billed separately."
+    )
+
     if st.button("🧹 Clear conversation", use_container_width=True):
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         st.session_state.tool_log = []
         st.session_state.pending_action = None
         st.session_state.turn_sources = []
+        st.session_state.usage = {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
         st.rerun()
 
 
