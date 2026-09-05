@@ -197,6 +197,8 @@ def init_state() -> None:
         st.session_state.tool_log = []
     if "pending_action" not in st.session_state:
         st.session_state.pending_action = None
+    if "pending_queue" not in st.session_state:
+        st.session_state.pending_queue = []
     if "turn_sources" not in st.session_state:
         st.session_state.turn_sources = []
     if "answer_sources" not in st.session_state:
@@ -263,10 +265,13 @@ def run_agent_turn():
                 args = {}
 
             if mcp and mcp.needs_confirmation(name):
-                st.session_state.pending_action = {
-                    "tool_call_id": tc.id, "name": name, "args": args,
-                }
-                return None
+                # Queue this gated call for approval. We must NOT return yet if
+                # there are more calls in this batch — every tool_call needs a
+                # response before the next LLM turn. So finish the batch first.
+                st.session_state.pending_queue.append(
+                    {"tool_call_id": tc.id, "name": name, "args": args}
+                )
+                continue
 
             result = mcp.call_tool(name, args)
             _record_source(name, result)
@@ -276,6 +281,11 @@ def run_agent_turn():
             st.session_state.messages.append(
                 {"role": "tool", "tool_call_id": tc.id, "content": result}
             )
+
+        # If any gated calls were queued this batch, pause for the first one.
+        if st.session_state.pending_queue:
+            st.session_state.pending_action = st.session_state.pending_queue.pop(0)
+            return None
 
     return "Stopped after too many tool calls — please refine your request."
 
@@ -305,6 +315,13 @@ def resume_after_confirmation(approved: bool) -> str:
     st.session_state.messages.append(
         {"role": "tool", "tool_call_id": pending["tool_call_id"], "content": result}
     )
+
+    # If more gated calls from the same batch are waiting, pause for the next one
+    # before going back to the model (all tool_calls need responses first).
+    if st.session_state.pending_queue:
+        st.session_state.pending_action = st.session_state.pending_queue.pop(0)
+        return None
+
     answer = run_agent_turn()
     return answer if answer is not None else "(waiting for another confirmation)"
 
@@ -362,6 +379,7 @@ with st.sidebar:
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         st.session_state.tool_log = []
         st.session_state.pending_action = None
+        st.session_state.pending_queue = []
         st.session_state.turn_sources = []
         st.session_state.usage = {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
         st.rerun()
@@ -404,9 +422,9 @@ with st.expander("💡 What can I ask? — example prompts"):
     st.markdown(
         "- **Bug report:** *Format this as a bug report: login button does nothing on Chrome, severity high*\n"
         "- **Docs (RAG):** *What known bugs affect the login page?*\n"
-        "- **Jira:** *Search my Jira with JQL `project = TEST ORDER BY created DESC`*\n"
+        "- **Jira:** *Create a Jira ticket in TEST(your JIRA git add app.py llm.pyspace name): login button unresponsive on Chrome, high priority*\n"
         "- **Gmail:** *Search my Gmail for my most recent emails*\n"
-        "- **Multi-server chain:** *Find the Chrome login bug in our docs, format it as a bug report, then email it to me*\n"
+        "- **Multi-server chain:** *Find the Chrome login bug in our docs, format it as a bug report, then email it to example@gmail.com (any mail address)*\n"
         "\n_Sending email pauses for your approval before it goes out._"
     )
 
@@ -437,18 +455,20 @@ if st.session_state.pending_action:
             if st.button("✅ Approve & run", use_container_width=True, type="primary"):
                 with st.spinner("Running..."):
                     answer = resume_after_confirmation(approved=True)
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": answer,
-                     "sources": list(st.session_state.turn_sources)}
-                )
-                st.rerun()
+                if answer is not None:
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": answer,
+                         "sources": list(st.session_state.turn_sources)}
+                    )
+                st.rerun()  # if None, another approval is queued — rerun shows it
         with c2:
             if st.button("❌ Cancel", use_container_width=True):
                 answer = resume_after_confirmation(approved=False)
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": answer,
-                     "sources": list(st.session_state.turn_sources)}
-                )
+                if answer is not None:
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": answer,
+                         "sources": list(st.session_state.turn_sources)}
+                    )
                 st.rerun()
     st.stop()
 

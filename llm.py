@@ -18,6 +18,49 @@ from openai import OpenAI
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
+def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Make the message list safe for OpenAI's strict tool-call rules:
+      1. Every assistant `tool_calls` entry must have a matching `tool` response.
+      2. Each `tool` response must come IMMEDIATELY AFTER that assistant message.
+    Approval pauses and Streamlit reruns can leave responses missing or out of
+    order; this rebuilds a valid sequence. It never mutates the caller's list.
+
+    - Assistant tool_calls with no response yet are dropped (kept as plain text
+      if they had any). An assistant left with neither text nor calls is removed.
+    - Tool responses are re-slotted right after their assistant message; orphan
+      tool messages (no matching call) are dropped.
+    """
+    # map tool_call_id -> its response message (last one wins)
+    responses: dict[str, dict[str, Any]] = {}
+    for m in messages:
+        if m.get("role") == "tool" and m.get("tool_call_id"):
+            responses[m["tool_call_id"]] = m
+
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role")
+        if role == "tool":
+            continue  # we re-insert these in the right place below
+        if role == "assistant" and m.get("tool_calls"):
+            kept = [tc for tc in m["tool_calls"] if tc.get("id") in responses]
+            if kept:
+                nm = dict(m)
+                nm["tool_calls"] = kept
+                out.append(nm)
+                # place each response immediately after
+                for tc in kept:
+                    out.append(responses[tc["id"]])
+            elif (m.get("content") or "").strip():
+                nm = dict(m)
+                nm.pop("tool_calls", None)
+                out.append(nm)
+            # else drop entirely
+        else:
+            out.append(m)
+    return out
+
+
 class LLMClient:
     """Minimal OpenAI client wrapper for the agent loop."""
 
@@ -45,7 +88,7 @@ class LLMClient:
         """
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
+            "messages": _sanitize_messages(messages),
         }
         if tools:
             kwargs["tools"] = tools
